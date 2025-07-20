@@ -2,7 +2,7 @@
 
 **This replaces the Python based FSR server as found at [teejusb's FSR repository](https://github.com/teejusb/fsr).** 
 
-This can be run directly as an exe, and does not use Python.
+This can be run directly as an exe, and is written in Go to allow for much higher performance than what the Python based server is capable of.
 
 **This is in a usable state, but has some known bugs.** For example, the major issue currently is that it only saves one threshold at a time. Also occasionally you need to start the exe over again if the values aren't updating in the web UI, and it's possible to crash the server by closing the web UI window. Please note issues in the Issues section if you run into any unexpected/unwanted behavior. When I get the threshold saving issue taken care of, I'll start distributing pre-built exe's.
 
@@ -14,7 +14,7 @@ For now you need to build it yourself. Once I some of the existing bugs worked o
 
 You only need to do this once. After you do it then you get a `server.exe` which you can run directly.
 
-If you already have a working Web UI with Python, then you can skip steps 2 thru 5 and go straight to building the exe.
+_If you already have a working Web UI setup, then you can skip steps 2 and 3._
 
 1.  Install [Go](https://go.dev/doc/install) latest version.
 2.  Install [Node.js](https://nodejs.org/en/download) whatever version is recommended should be fine
