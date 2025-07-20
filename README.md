@@ -16,14 +16,15 @@ You only need to do this once. After you do it then you get a `server.exe` which
 
 If you already have a working Web UI with Python, then you can skip steps 2 thru 5 and go straight to building the exe.
 
-1.  Install [Go](https://go.dev/doc/install)
-2.  Install [Node.js](https://nodejs.org/en/download)
-    -   This can be used with the latest Node.js and Yarn (tested/built on Node.js 22.17.1 LTS).
+1.  Install [Go](https://go.dev/doc/install) latest version.
+2.  Install [Node.js](https://nodejs.org/en/download) latest version
 3.  Install [Yarn](https://classic.yarnpkg.com/en/docs/install#windows-stable)  by running `npm install -g yarn` after installing Node.js
-4.  Open a console (for example, Windows Terminal) and navigate to the `webui` folder by typing `cd ` and then dragging the `webui` folder onto your Terminal.
-5.  Run `yarn install && yarn build`
-6.  Enter the `server` folder with `cd server`.
-7.  Build the exe
+4.  Open a console (for example, Windows Terminal) and navigate to the `fsr-server` folder by typing `cd ` and then dragging the `fsr-server` folder onto your Terminal.
+5.  Run `go mod init`
+6.  Enter the `webui` folder with `cd webui`.  
+7.  Run `yarn install && yarn build`
+8.  Enter the `server` folder with `cd server`.
+9.  Build the exe
    -  Windows: `go build -o server.exe .\server.go`
    -  Linux or Mac: `go build -o server ./server.go`
 
