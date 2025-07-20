@@ -20,7 +20,7 @@
   },
   "scripts": {
     "start": "react-scripts start",
-    "start-api": "cd server && venv/Scripts/python server.py",
+    "start-api": "echo This server doesn't use start-api. Go into the server folder and open the server program. If all you see is server.go, please refer to the build instructions.",
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
