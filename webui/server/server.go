@@ -726,11 +726,7 @@ func discoverIP() string {
 }
 
 func main() {
-	// Define command line flags for configuration:
-	// --gamepad: Specifies the serial port where the FSR (Force Sensitive Resistor) device is connected
-	// --port: The network port where the web interface will be served
-	// --sensors: The number of FSR sensors connected to the device
-	// e.g. .\server.exe --gamepad COM4 --port 5678 --sensors 8
+	// example: .\server.exe --gamepad COM4 --port 5678 --sensors 8
 	gamepad := flag.String("gamepad", "/dev/ttyACM0", "Serial port to use (e.g., COM5 on Windows, /dev/ttyACM0 on Linux)")
 	port := flag.String("port", "5000", "Port for the server to listen on")
 	numSensors := flag.Int("sensors", NUM_SENSORS, "Number of FSR sensors (default 4)")
