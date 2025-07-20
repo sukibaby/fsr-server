@@ -733,9 +733,6 @@ func main() {
 
 	// Parse command line flags
 	flag.Parse()
-	if *numSensors == NUM_SENSORS {
-		log.Printf("No value provided for --sensors flag; using default of %d sensors", NUM_SENSORS)
-	}
 
 	// Update the global sensor count if the command line argument was specified
 	NUM_SENSORS = *numSensors
