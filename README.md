@@ -1,4 +1,4 @@
-# FSR Server
+# Go-based FSR Server (unfinished)
 
 **This replaces the Python based FSR server as found at [teejusb's FSR repository](https://github.com/teejusb/fsr).** 
 
