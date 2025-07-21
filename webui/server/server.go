@@ -1,5 +1,13 @@
 // TODO
 //
+// Version 3.1
+//
+// Cleaned up some extraneous logging.
+// Profile menu kind of works now, but doesn't work completely yet.
+// Need to check profile switching logic.
+// Save Thresholds button works once, but then not again...?
+// Also, still can't connect to localhost:5000.
+//
 // Version 3
 //
 // Made some progress on trying to ensure that serial communication is non blocking,
@@ -118,18 +126,25 @@ var (
 )
 
 func onStartup() {
+	log.Println("[STARTUP] Loading profiles...")
 	profileHandler.LoadProfiles()
 
 	// Ensure we have at least an empty profile
 	if len(profileHandler.GetProfileNames()) == 0 {
+		log.Println("[STARTUP] No profiles found, creating default profile")
 		emptyProfile := make([]int, profileHandler.NumSensors)
 		profileHandler.AddProfile("Default", emptyProfile)
 	}
 
+	log.Println("[STARTUP] Starting serial communication handlers...")
 	// Start serial read/write goroutines immediately
 	go serialHandler.write()
 	go serialHandler.ReadLoop()
 
+	// Wait a moment for the serial connection to stabilize
+	time.Sleep(100 * time.Millisecond)
+
+	log.Println("[STARTUP] Requesting initial thresholds from device...")
 	// Request current thresholds from device
 	trySendSerial("t\n")
 }
@@ -271,6 +286,9 @@ func (p *ProfileHandler) AddProfile(name string, thresholds []int) {
 	broadcastMessage([]any{"get_profiles", map[string]any{
 		"profiles": p.GetProfileNames(),
 	}})
+	broadcastMessage([]any{"get_cur_profile", map[string]any{
+		"cur_profile": p.CurProfile,
+	}})
 }
 
 func (p *ProfileHandler) RemoveProfile(name string) {
@@ -292,6 +310,9 @@ func (p *ProfileHandler) RemoveProfile(name string) {
 	}})
 	broadcastMessage([]any{"get_profiles", map[string]any{
 		"profiles": p.GetProfileNames(),
+	}})
+	broadcastMessage([]any{"get_cur_profile", map[string]any{
+		"cur_profile": p.CurProfile,
 	}})
 }
 
@@ -380,7 +401,6 @@ func (s *SerialHandler) Open() bool {
 
 	// Always try to close existing connection first
 	if s.SerialPort != nil {
-		log.Printf("[SERIAL] Closing existing connection")
 		s.SerialPort.Flush()
 		s.SerialPort.Close()
 		s.SerialPort = nil
@@ -398,8 +418,6 @@ func (s *SerialHandler) Open() bool {
 		}
 		port, err := serial.OpenPort(config)
 		if err == nil {
-			log.Printf("[SERIAL] Device detected on %s", s.Port)
-
 			// Flush any pending data - always read even if errors to clear the buffer
 			buf := make([]byte, 1024)
 			for attempts := 0; attempts < 10; attempts++ {
@@ -407,37 +425,43 @@ func (s *SerialHandler) Open() bool {
 				if n == 0 {
 					break
 				}
-				log.Printf("[SERIAL] Flushed %d bytes", n)
 			}
 			port.Flush()
 
 			// Set the port before handshake so ReadLoop can use it
 			s.SerialPort = port
 
-			thresholds := s.Profile.GetCurrentThresholds()
-			log.Printf("[SERIAL] Current thresholds: %v", thresholds)
+			// s.Profile.GetCurrentThresholds() was previously used for logging
 
-			// Initial handshake - send a command and verify response
+			// Initial handshake - first request version/values, then thresholds
 			_, err = port.Write([]byte("v\n"))
 			if err == nil {
 				reader := bufio.NewReader(port)
 				response, err := reader.ReadString('\n')
 				if err == nil {
-					log.Printf("[SERIAL] Handshake successful with response: %s", response)
-					return true
-				} else {
-					log.Printf("[SERIAL] Handshake read failed: %v", err)
-				}
-			} else {
-				log.Printf("[SERIAL] Handshake write failed: %v", err)
-			}
 
-			log.Printf("[SERIAL] Port opened but handshake failed, retrying...")
+					// Now request current thresholds from device
+					_, err = port.Write([]byte("t\n"))
+					if err == nil {
+						response, err = reader.ReadString('\n')
+						if err == nil {
+							// Parse threshold response
+							parts := strings.Fields(response)
+							if len(parts) == s.NumSensors+1 && parts[0] == "t" {
+								thresholds := make([]int, s.NumSensors)
+								for i := 0; i < s.NumSensors; i++ {
+									thresholds[i], _ = strconv.Atoi(parts[i+1])
+								}
+								s.Profile.UpdateAllThresholds(thresholds)
+							}
+							return true
+						}
+					}
+				}
+			}
 			port.Close()
 			s.SerialPort = nil
 		}
-
-		log.Printf("Attempt %d: Error opening serial port: %v", attempt+1, err)
 		if attempt < maxAttempts-1 {
 			// Increased delay between attempts
 			time.Sleep(time.Second * 2)
@@ -456,11 +480,8 @@ func (s *SerialHandler) write() {
 		case command := <-s.writeQueue:
 			if s.SerialPort != nil {
 				s.Mutex.Lock()
-				_, err := s.SerialPort.Write([]byte(command))
+				_, _ = s.SerialPort.Write([]byte(command))
 				s.Mutex.Unlock()
-				if err != nil {
-					log.Printf("Error writing to serial port: %v", err)
-				}
 			}
 		}
 	}
@@ -471,9 +492,8 @@ func (s *SerialHandler) write() {
 func trySendSerial(cmd string) {
 	select {
 	case serialHandler.writeQueue <- cmd:
-		// Non-blocking send: command enqueued
 	default:
-		log.Printf("Serial write queue full, dropping command: %q", cmd)
+		// Channel full, command dropped
 	}
 }
 
@@ -535,11 +555,18 @@ func (s *SerialHandler) ReadLoop() {
 					s.Profile.UpdateThreshold(i, val)
 				}
 			}
-		case "p", "s":
+		case "s":
+			log.Printf("[SERIAL] Save thresholds command acknowledged by device")
+			curThresholds := s.Profile.GetCurrentThresholds()
+			broadcastMessage([]any{"thresholds_persisted", map[string]any{
+				"thresholds": curThresholds,
+			}})
+			log.Printf("[SERIAL] Thresholds saved to device: %v", curThresholds)
+		case "p":
 			broadcastMessage([]any{"thresholds_persisted", map[string]any{
 				"thresholds": actual,
 			}})
-			log.Printf("Thresholds saved to device: %v", actual)
+			log.Printf("[SERIAL] Thresholds persisted to device: %v", actual)
 		}
 	}
 }
@@ -674,8 +701,10 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				case "save_thresholds":
+					log.Printf("[WS] Received save_thresholds request")
 					// Non-blocking send: save thresholds command
 					trySendSerial("s\n") // Prevents blocking if channel is full
+					log.Printf("[WS] Sent save command to serial port")
 				case "add_profile":
 					if len(message) >= 3 {
 						if name, ok := message[1].(string); ok {
