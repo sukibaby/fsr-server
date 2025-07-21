@@ -1,8 +1,6 @@
 # Go-based FSR Server (unfinished)
 
-For now you need to build it yourself. Once I some of the existing bugs worked out I will provide one that is pre-built.
-
-You only need to do this once. After you do it then you get a `server.exe` which you can run directly.
+For now you need to build it yourself. It is in a mostly usable state, but is unfinished, so some thing (like the Profile menu) just don't work yet. After you build it then you get a `server.exe` which you can run directly.
 
 _If you already have a working Web UI setup, then you can skip steps 2 and 3._
 
