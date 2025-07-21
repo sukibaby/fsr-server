@@ -1,12 +1,12 @@
 // TODO
 //
-// The previous version was working with the following notes
+// Version 3
 //
-//  - the serial port should be closed properly on shutdown.
-//  -  thresholds need to be saved properly.  currently they are saved one at a time.
-//  -  make sure the react app and server are in sync with the actual thresholds being used.
-//     seems like the react app is always using the set of thresholds from when the server
-//     started, not the current ones.
+// Made some progress on trying to ensure that serial communication is non blocking,
+//  but localhost:5000 connections stopped working.
+// Remove NoSerial flag for now until main functionality is verified.
+//
+// Version 2
 //
 // The current version has refactored serial handling to be more robust.
 //   But it broke the initial threshold request from the device and some other
@@ -19,6 +19,14 @@
 //  I also know the profile menu is not working as intended right now.
 //  Besides that, I also need to test how it handles the USB device being unplugged
 //   and reconnected.
+//
+// Version 1
+//
+//  - the serial port should be closed properly on shutdown.
+//  -  thresholds need to be saved properly.  currently they are saved one at a time.
+//  -  make sure the react app and server are in sync with the actual thresholds being used.
+//     seems like the react app is always using the set of thresholds from when the server
+//     started, not the current ones.
 
 package main
 
@@ -29,7 +37,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -47,20 +54,6 @@ import (
 	"github.com/tarm/serial"
 )
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 type ProfileHandler struct {
 	Filename   string
 	Profiles   map[string][]int
@@ -74,7 +67,6 @@ type SerialHandler struct {
 	BaudRate   int
 	SerialPort *serial.Port
 	Profile    *ProfileHandler
-	NoSerial   bool
 	NumSensors int
 	Mutex      sync.Mutex
 	writeQueue chan string
@@ -134,7 +126,12 @@ func onStartup() {
 		profileHandler.AddProfile("Default", emptyProfile)
 	}
 
+	// Start serial read/write goroutines immediately
+	go serialHandler.write()
 	go serialHandler.ReadLoop()
+
+	// Request current thresholds from device
+	trySendSerial("t\n")
 }
 
 func onShutdown() {
@@ -365,31 +362,30 @@ func (p *ProfileHandler) UpdateAllThresholds(values []int) {
 	}
 }
 
-func NewSerialHandler(port string, baudRate int, profile *ProfileHandler, numSensors int, noSerial bool) *SerialHandler {
-	return &SerialHandler{
+func NewSerialHandler(port string, baudRate int, profile *ProfileHandler, numSensors int) *SerialHandler {
+	sh := &SerialHandler{
 		Port:       port,
 		BaudRate:   baudRate,
 		Profile:    profile,
-		NoSerial:   noSerial,
 		NumSensors: numSensors,
 		writeQueue: make(chan string, 256),
 	}
+	sh.Open() // Open the port immediately like Python does
+	return sh
 }
 
 func (s *SerialHandler) Open() bool {
-	if s.NoSerial {
-		return true
-	}
-
 	s.Mutex.Lock()
 	defer s.Mutex.Unlock()
 
 	// Always try to close existing connection first
 	if s.SerialPort != nil {
+		log.Printf("[SERIAL] Closing existing connection")
+		s.SerialPort.Flush()
 		s.SerialPort.Close()
 		s.SerialPort = nil
 		// Wait for the OS to fully release the port
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(time.Second * 2)
 	}
 
 	// Try to open the port with fixed delay between attempts
@@ -398,22 +394,26 @@ func (s *SerialHandler) Open() bool {
 		config := &serial.Config{
 			Name:        s.Port,
 			Baud:        s.BaudRate,
-			ReadTimeout: time.Second, // Increased timeout
+			ReadTimeout: time.Second * 2, // Increased timeout further
 		}
 		port, err := serial.OpenPort(config)
 		if err == nil {
-			s.SerialPort = port
+			log.Printf("[SERIAL] Device detected on %s", s.Port)
 
-			// Flush any pending data
+			// Flush any pending data - always read even if errors to clear the buffer
 			buf := make([]byte, 1024)
-			for {
-				n, err := port.Read(buf)
-				if err != nil || n == 0 {
+			for attempts := 0; attempts < 10; attempts++ {
+				n, _ := port.Read(buf)
+				if n == 0 {
 					break
 				}
+				log.Printf("[SERIAL] Flushed %d bytes", n)
 			}
+			port.Flush()
 
-			log.Printf("[SERIAL] Device detected on %s", s.Port)
+			// Set the port before handshake so ReadLoop can use it
+			s.SerialPort = port
+
 			thresholds := s.Profile.GetCurrentThresholds()
 			log.Printf("[SERIAL] Current thresholds: %v", thresholds)
 
@@ -421,20 +421,26 @@ func (s *SerialHandler) Open() bool {
 			_, err = port.Write([]byte("v\n"))
 			if err == nil {
 				reader := bufio.NewReader(port)
-				_, err = reader.ReadString('\n')
+				response, err := reader.ReadString('\n')
 				if err == nil {
+					log.Printf("[SERIAL] Handshake successful with response: %s", response)
 					return true
+				} else {
+					log.Printf("[SERIAL] Handshake read failed: %v", err)
 				}
+			} else {
+				log.Printf("[SERIAL] Handshake write failed: %v", err)
 			}
 
-			log.Printf("Port opened but handshake failed, retrying...")
+			log.Printf("[SERIAL] Port opened but handshake failed, retrying...")
 			port.Close()
+			s.SerialPort = nil
 		}
 
 		log.Printf("Attempt %d: Error opening serial port: %v", attempt+1, err)
 		if attempt < maxAttempts-1 {
 			// Increased delay between attempts
-			time.Sleep(time.Second)
+			time.Sleep(time.Second * 2)
 		}
 	}
 
@@ -448,200 +454,112 @@ func (s *SerialHandler) write() {
 		case <-shutdownSignal:
 			return
 		case command := <-s.writeQueue:
-			if s.NoSerial {
-				if command[0] == 't' {
-					broadcastMessage([]any{"thresholds",
-						map[string]any{"thresholds": s.Profile.GetCurrentThresholds()}})
-					log.Println("Thresholds are:", s.Profile.GetCurrentThresholds())
-				} else {
-					if len(command) > 2 {
-						parts := strings.Fields(command)
-						if len(parts) == 2 {
-							sensor, _ := strconv.Atoi(parts[0])
-							threshold, _ := strconv.Atoi(parts[1])
-							for i := range sensor_numbers {
-								if i == sensor {
-									s.Profile.UpdateThreshold(i, threshold)
-								}
-							}
-						}
-					}
+			if s.SerialPort != nil {
+				s.Mutex.Lock()
+				_, err := s.SerialPort.Write([]byte(command))
+				s.Mutex.Unlock()
+				if err != nil {
+					log.Printf("Error writing to serial port: %v", err)
 				}
-				continue
-			}
-
-			if s.SerialPort == nil {
-				time.Sleep(time.Second)
-				continue
-			}
-
-			s.Mutex.Lock()
-			_, err := s.SerialPort.Write([]byte(command))
-			s.Mutex.Unlock()
-
-			if err != nil {
-				log.Printf("Error writing to serial port: %v", err)
-				s.SerialPort = nil
 			}
 		}
+	}
+}
+
+// trySendSerial is a helper for non-blocking send to the serial write queue.
+// If the channel is full, the command is dropped and a warning is logged.
+func trySendSerial(cmd string) {
+	select {
+	case serialHandler.writeQueue <- cmd:
+		// Non-blocking send: command enqueued
+	default:
+		log.Printf("Serial write queue full, dropping command: %q", cmd)
 	}
 }
 
 // ReadLoop implements a proper line-based read cycle with synchronized writes
 func (s *SerialHandler) ReadLoop() {
-	lastValues := make([]int, s.NumSensors)
-
-	// Start the write goroutine
-	go s.write()
-
-	// Start periodic threshold checks
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				if s.SerialPort != nil && !s.NoSerial {
-					s.writeQueue <- "t\n"
-				}
-			case <-shutdownSignal:
-				return
+	for {
+		// Try to open port if needed
+		if s.SerialPort == nil {
+			if !s.Open() {
+				time.Sleep(time.Second)
+				continue
 			}
 		}
-	}()
 
-	for {
-		if s.NoSerial {
-			// Simulate sensor values with normal distribution for more realistic changes
-			values := make([]int, s.NumSensors)
-			for i := range values {
-				offset := int(rand.NormFloat64() * float64(s.NumSensors+1))
-				newVal := lastValues[i] + offset
-				values[i] = max(0, min(newVal, 1023))
-				lastValues[i] = values[i]
+		// Request values
+		trySendSerial("v\n")
+
+		// Read response
+		reader := bufio.NewReader(s.SerialPort)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			log.Printf("Error reading from serial port: %v", err)
+			if s.SerialPort != nil {
+				s.SerialPort.Close()
+				s.SerialPort = nil
 			}
-			broadcastMessage([]any{"values", map[string]any{"values": values}})
-			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
-		for {
-			if s.NoSerial {
-				// Simulate sensor values with normal distribution for more realistic changes
-				values := make([]int, s.NumSensors)
-				for i := range values {
-					offset := int(rand.NormFloat64() * float64(s.NumSensors+1))
-					newVal := lastValues[i] + offset
-					values[i] = max(0, min(newVal, 1023))
-					lastValues[i] = values[i]
+		// Parse response
+		parts := strings.Fields(line)
+		if len(parts) != s.NumSensors+1 {
+			continue
+		}
+
+		cmd := parts[0]
+		values := make([]int, s.NumSensors)
+		for i := 0; i < s.NumSensors; i++ {
+			values[i], _ = strconv.Atoi(parts[i+1])
+		}
+
+		// Fix sensor ordering
+		actual := make([]int, s.NumSensors)
+		for i := range sensor_numbers {
+			actual[i] = values[sensor_numbers[i]]
+		}
+
+		switch cmd {
+		case "v":
+			broadcastMessage([]any{"values", map[string]any{
+				"values": actual,
+			}})
+			// 8ms looks nice and smooth i think
+			time.Sleep(8 * time.Millisecond)
+		case "t":
+			curThresholds := s.Profile.GetCurrentThresholds()
+			for i, val := range actual {
+				if cur := curThresholds[i]; cur != val {
+					s.Profile.UpdateThreshold(i, val)
 				}
-				broadcastMessage([]any{"values", map[string]any{"values": values}})
-				time.Sleep(10 * time.Millisecond)
-				continue
 			}
-
-			if s.SerialPort == nil {
-				if !s.Open() {
-					time.Sleep(time.Second)
-					continue
-				}
-				// Apply current thresholds when reconnecting
-				thresholds := s.Profile.GetCurrentThresholds()
-				for i, t := range thresholds {
-					cmd := fmt.Sprintf("%d %d\n", sensor_numbers[i], t)
-					s.writeQueue <- cmd
-				}
-				continue
-			}
-
-			// Poll: write 'v\n' directly, then read response
-			_, err := s.SerialPort.Write([]byte("v\n"))
-			if err != nil {
-				log.Printf("Error writing to serial port: %v, attempting to reconnect", err)
-				s.SerialPort = nil
-				time.Sleep(time.Second)
-				continue
-			}
-			reader := bufio.NewReader(s.SerialPort)
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				log.Printf("Error reading from serial port: %v, attempting to reconnect", err)
-				s.SerialPort = nil
-				time.Sleep(time.Second)
-				continue
-			}
-
-			// Trim any whitespace and split into fields
-			parts := strings.Fields(line)
-			if len(parts) != s.NumSensors+1 {
-				// Invalid response, immediately try again
-				continue
-			}
-
-			cmd := parts[0]
-			values := make([]int, s.NumSensors)
-			for i := 0; i < s.NumSensors; i++ {
-				values[i], _ = strconv.Atoi(parts[i+1])
-			}
-			// Fix sensor ordering
-			actual := make([]int, s.NumSensors)
-			for i := range sensor_numbers {
-				actual[i] = values[sensor_numbers[i]]
-			}
-
-			switch cmd {
-			case "v":
-				broadcastMessage([]any{"values", map[string]any{
-					"values": actual,
-				}})
-				time.Sleep(10 * time.Millisecond)
-			case "t":
-				curThresholds := s.Profile.GetCurrentThresholds()
-				for i, val := range actual {
-					if cur := curThresholds[i]; cur != val {
-						s.Profile.UpdateThreshold(i, val)
-					}
-				}
-			case "p":
-				broadcastMessage([]any{"thresholds_persisted", map[string]any{
-					"thresholds": actual,
-				}})
-				log.Printf("Saved thresholds to device: %v", s.Profile.GetCurrentThresholds())
-			}
-
-			time.Sleep(time.Millisecond)
+		case "p", "s":
+			broadcastMessage([]any{"thresholds_persisted", map[string]any{
+				"thresholds": actual,
+			}})
+			log.Printf("Thresholds saved to device: %v", actual)
 		}
 	}
 }
 
-// Optimize WebSocket writes to ensure non-blocking behavior
+// Optimize WebSocket writes to ensure non-blocking behavior like Python's implementation
 func broadcastMessage(message []any) {
 	clientsMux.Lock()
+	defer clientsMux.Unlock()
+
 	for client := range clients {
 		select {
 		case client.send <- message:
-			// Message sent successfully
+			// Message sent successfully to client's queue
 		case <-shutdownSignal:
-			clientsMux.Unlock()
 			return
 		default:
-			// If we can't send immediately, don't block
-			go func(c *Client, msg []any) {
-				select {
-				case c.send <- msg:
-					// Sent after brief wait
-				case <-time.After(10 * time.Millisecond):
-					// If still can't send after timeout, close connection
-					close(c.send)
-					clientsMux.Lock()
-					delete(clients, c)
-					clientsMux.Unlock()
-				}
-			}(client, message)
+			// If queue is full, skip this client like Python does
+			log.Printf("Client queue full, skipping broadcast")
 		}
 	}
-	clientsMux.Unlock()
 }
 
 // handleWS handles websocket connections
@@ -749,13 +667,15 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 								if idx := int(index); idx >= 0 && idx < len(intValues) {
 									profileHandler.UpdateThreshold(idx, intValues[idx])
 									cmd := fmt.Sprintf("%d %d\n", sensor_numbers[idx], intValues[idx])
-									serialHandler.writeQueue <- cmd
+									// Non-blocking send: threshold update from client
+									trySendSerial(cmd) // Prevents blocking if channel is full
 								}
 							}
 						}
 					}
 				case "save_thresholds":
-					serialHandler.writeQueue <- "s\n"
+					// Non-blocking send: save thresholds command
+					trySendSerial("s\n") // Prevents blocking if channel is full
 				case "add_profile":
 					if len(message) >= 3 {
 						if name, ok := message[1].(string); ok {
@@ -783,7 +703,8 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 							thresholds := profileHandler.GetCurrentThresholds()
 							for i, t := range thresholds {
 								cmd := fmt.Sprintf("%d %d\n", sensor_numbers[i], t)
-								serialHandler.writeQueue <- cmd
+								// Non-blocking send: apply thresholds after profile change
+								trySendSerial(cmd) // Prevents blocking if channel is full
 							}
 						}
 					}
@@ -799,7 +720,8 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 							profileHandler.UpdateAllThresholds(intValues)
 							for i, t := range intValues {
 								cmd := fmt.Sprintf("%d %d\n", sensor_numbers[i], t)
-								serialHandler.writeQueue <- cmd
+								// Non-blocking send: update all thresholds
+								trySendSerial(cmd) // Prevents blocking if channel is full
 							}
 						}
 					}
@@ -808,18 +730,30 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Writer goroutine - handles outgoing messages
 	go func() {
-		for message := range client.send {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+
+		for {
 			select {
-			case <-shutdownSignal:
-				return
-			default:
+			case message, ok := <-client.send:
+				if !ok {
+					return
+				}
 				// SetWriteDeadline prevents blocking
 				conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 				if err := conn.WriteJSON(message); err != nil {
 					if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 						log.Printf("Error writing to websocket: %v", err)
 					}
+					return
+				}
+			case <-shutdownSignal:
+				return
+			case <-ticker.C:
+				// Send ping to keep connection alive, like Python's keepalive
+				if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(100*time.Millisecond)); err != nil {
 					return
 				}
 			}
@@ -832,7 +766,16 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func defaultsHandler(w http.ResponseWriter, r *http.Request) {
+	// Set CORS headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	w.Header().Set("Content-Type", "application/json")
+
+	// Handle preflight requests
+	if r.Method == "OPTIONS" {
+		return
+	}
 
 	// Always return an empty string rather than null.
 	profiles := profileHandler.GetProfileNames()
@@ -861,34 +804,22 @@ func defaultsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func discoverIP() string {
-	ip := "127.0.0.1"
-
-	ifaces, err := net.Interfaces()
+	hostname, err := os.Hostname()
 	if err != nil {
-		return ip
+		return "127.0.0.1"
 	}
-
-	for _, iface := range ifaces {
-		// Skip loopback and down interfaces
-		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			switch v := addr.(type) {
-			case *net.IPNet:
-				if v.IP.To4() != nil && !v.IP.IsLoopback() {
-					return v.IP.String()
-				}
-			}
+	addrs, err := net.LookupHost(hostname)
+	if err != nil || len(addrs) == 0 {
+		return "127.0.0.1"
+	}
+	// Prefer the first non-loopback IPv4 address, else fallback to the first address.
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip != nil && !ip.IsLoopback() && ip.To4() != nil {
+			return addr
 		}
 	}
-	return ip
+	return addrs[0]
 }
 
 func main() {
@@ -923,51 +854,49 @@ func main() {
 	}()
 
 	profileHandler = NewProfileHandler("profiles.txt", NUM_SENSORS)
-	serialHandler = NewSerialHandler(*gamepad, 115200, profileHandler, NUM_SENSORS, false)
+	serialHandler = NewSerialHandler(*gamepad, 115200, profileHandler, NUM_SENSORS)
 
 	// Set up the HTTP router for the web interface
 	r := mux.NewRouter()
 
-	// Configure the main API endpoints
-	// /defaults - Returns current system state (profiles, thresholds)
-	// /ws - WebSocket endpoint for real-time updates
+	// Match Python's routes exactly
 	r.HandleFunc("/defaults", defaultsHandler).Methods("GET")
 	r.HandleFunc("/ws", handleWS)
-	apiRouter := r.PathPrefix("/api").Subrouter()
-	apiRouter.HandleFunc("/ws", handleWS)
-	apiRouter.HandleFunc("/defaults", defaultsHandler).Methods("GET")
 
-	// Handlers for static files
+	// Create static file server
 	staticFs := http.FileServer(http.Dir(buildDir))
+
+	// SPA routes first
+	r.HandleFunc("/", getIndex)
+	r.HandleFunc("/plot", getIndex)
+
+	// Then specific static file routes
 	r.PathPrefix("/static/").Handler(staticFs)
 	r.PathPrefix("/favicon.ico").Handler(staticFs)
 	r.PathPrefix("/manifest.json").Handler(staticFs)
 	r.PathPrefix("/logo").Handler(staticFs)
 
-	// SPA routes all return the main index.html
-	r.HandleFunc("/", getIndex)
-	r.HandleFunc("/plot", getIndex)
-	r.PathPrefix("/").HandlerFunc(getIndex) // catch-all for other client routes
+	// Catch-all route last
+	r.PathPrefix("/").Handler(staticFs)
 
 	// Initialize the HTTP server
 	srv := &http.Server{
-		Addr:    ":" + *port,
+		Addr:    ":" + *port, // :port means listen on all interfaces (0.0.0.0)
 		Handler: r,
 	}
 
-	// onStartup function will load saved profiles from disk and start the serial communication loop
-	onStartup()
-
-	// Get the server's IPv4 IP address for displaying the access URL
-	ipToShow := discoverIP()
-
-	// Start the HTTP server in a separate goroutine
+	// Start the HTTP server
 	go func() {
-		fmt.Printf(" * WebUI can be found at: http://%s:%s\n", ipToShow, *port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("ListenAndServe(): %v", err)
 		}
 	}()
+
+	// Show both localhost and network IP like Python would
+	fmt.Printf(" * WebUI can be found at: http://%s:%s\n", discoverIP(), *port)
+
+	// onStartup function loads profiles and starts serial communication
+	onStartup()
 
 	// Wait for shutdown signal
 	<-shutdownSignal
