@@ -45,7 +45,3 @@ You  can use `--gamepad`, `--sensors`, and `--port` in any combination.
 If you use something like `start_fsrs.bat` to start your server, you can instead maintain this functionality by making a shortcut to the `server.exe`. Then right-click the shortcut and choose "Properties". At the end of the "Target" field, add the flags you need.
 
 <img width="390" height="566" alt="image" src="https://github.com/user-attachments/assets/0c914ac9-6735-4c81-9d8f-b03ad17d3ace" />
-
-# Credits / License
-
-This project is GPLv3 licensed. With the exception of the contents of the `server` directory, everything in the `webui` directory is exactly as it's found in [teejusb's FSR repository](https://github.com/teejusb/fsr) which is GPLv3.
