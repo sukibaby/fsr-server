@@ -20,23 +20,17 @@ Now the server is built. From now on you just need to run `server.exe` (or `serv
 
 # Usage
 
-You just pass the needed settings as flags to the program. At a minimum, you have to define the serial port the pad is on.
-
-For example, if your pad is on COM4:
+Define the pad's serial port with --gamepad
 
 `server.exe --gamepad COM4`
 
-You can also define the web port you want the UI to be accessible from, and the number of sensors.
+Defining the number of sensors:
 
-For example, if your pad is on COM9, and you have 8 sensors in the pad:
+`server.exe --sensors 8`
 
-`server.exe --gamepad COM9 --sensors 8`
-
-Or if you want to run the server on port 5001 instead of port 5000 (the default):
+Defining what port the server should use (defaults to 5000):
 
 `server.exe --port 5001`
-
-You  can use `--gamepad`, `--sensors`, and `--port` in any combination.
 
 # Making a shortcut
 
